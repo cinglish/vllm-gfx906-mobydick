@@ -266,8 +266,10 @@ def _index_block_score_kernel(
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
         )
-        if k.dtype == tl.float32:
+        if k.dtype != tl.float16:
             k = k.to(tl.float16)
+        if q.dtype != tl.float16:
+            q = q.to(tl.float16)
         qk = tl.dot(q, k) * sm_scale_log2e
         # apply causal mask as needed
         if q_start < i + BLOCK_SIZE_K:
@@ -483,8 +485,10 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        if k.dtype == tl.float32:
+        if k.dtype != tl.float16:
             k = k.to(tl.float16)
+        if q.dtype != tl.float16:
+            q = q.to(tl.float16)
         kq = tl.dot(k, q) * sm_scale_log2e  # [N,H]
         kq = tl.where(pos_mask[:, None], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [H]

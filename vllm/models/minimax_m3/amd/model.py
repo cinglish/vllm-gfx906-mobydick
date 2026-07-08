@@ -1061,6 +1061,12 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsEagle3):
     }
 
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "language_model.": "",
+            "vision_tower.": None,
+            "multi_modal_projector.": None,
+            "patch_merge_mlp.": None,
+        },
         orig_to_new_substr={
             ".mlp.fc1.": ".fc1.",
             ".mlp.fc2.": ".fc2.",
@@ -1108,7 +1114,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsEagle3):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 # TODO(refactor): this VL wrapper is platform-agnostic and byte-identical to the
