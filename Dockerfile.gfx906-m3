@@ -1,0 +1,13 @@
+FROM aiinfos/vllm-gfx906-mobydick:latest
+
+# Fix ForCausalLM WeightsMapper: strip language_model. prefix, drop vision weights
+# Fix load_weights: pass mapper to AutoWeightsLoader
+COPY vllm/models/minimax_m3/amd/model.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/models/minimax_m3/amd/model.py
+
+# Fix indexer kernel: cast bf16→fp16 before tl.dot (gfx906 has no bf16 matmul)
+COPY vllm/models/minimax_m3/common/ops/index_topk.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/models/minimax_m3/common/ops/index_topk.py
+
+# Clear any baked-in Triton cache so patched kernels recompile
+RUN rm -rf /root/.triton/cache
