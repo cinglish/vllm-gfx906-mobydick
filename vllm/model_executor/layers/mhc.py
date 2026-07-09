@@ -10,13 +10,17 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
 
 # gfx906 (MI50/MI60) has no native bf16 support; use fp16 instead.
+# Also, tilelang's HIP templates include rocwmma which doesn't support
+# gfx906, so we disable tilelang on gfx906 to use native torch/triton fallbacks.
+_IS_GFX906 = False
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx906
-    _LP_TORCH = torch.float16 if on_gfx906() else torch.bfloat16
+    _IS_GFX906 = on_gfx906()
+    _LP_TORCH = torch.float16 if _IS_GFX906 else torch.bfloat16
 else:
     _LP_TORCH = torch.bfloat16
 
-HAS_TILELANG = has_tilelang()
+HAS_TILELANG = has_tilelang() and not _IS_GFX906
 
 
 # --8<-- [start:mhc_pre]
