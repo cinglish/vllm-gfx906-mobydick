@@ -9,5 +9,27 @@ COPY vllm/models/minimax_m3/amd/model.py \
 COPY vllm/models/minimax_m3/common/ops/index_topk.py \
      /usr/local/lib/python3.12/dist-packages/vllm/models/minimax_m3/common/ops/index_topk.py
 
+# DeepSeek-V4: replace hardcoded bf16 with platform-aware dtype (fp16 on gfx906)
+COPY vllm/model_executor/kernels/mhc/tilelang.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/mhc/tilelang.py
+COPY vllm/model_executor/kernels/mhc/tilelang_kernels.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/mhc/tilelang_kernels.py
+COPY vllm/model_executor/kernels/mhc/torch.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/mhc/torch.py
+COPY vllm/model_executor/layers/mhc.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/mhc.py
+COPY vllm/models/deepseek_v4/amd/rocm.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/amd/rocm.py
+COPY vllm/models/deepseek_v4/attention.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/attention.py
+COPY vllm/models/deepseek_v4/sparse_mla.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/sparse_mla.py
+COPY vllm/models/deepseek_v4/common/ops/cache_utils.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/common/ops/cache_utils.py
+COPY vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py
+COPY vllm/models/deepseek_v4/common/ops/fused_indexer_q.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/common/ops/fused_indexer_q.py
+
 # Clear any baked-in Triton cache so patched kernels recompile
 RUN rm -rf /root/.triton/cache
