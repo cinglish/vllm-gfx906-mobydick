@@ -2,6 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms import current_platform
+
+# gfx906 (MI50/MI60) has no native bf16 support; use fp16 instead.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx906
+    _LP_TORCH = torch.float16 if on_gfx906() else torch.bfloat16
+else:
+    _LP_TORCH = torch.bfloat16
+
 
 def mhc_pre_torch(
     residual: torch.Tensor,
@@ -37,7 +46,7 @@ def mhc_pre_torch(
     """
 
     # Validate shapes
-    assert residual.dtype == torch.bfloat16
+    assert residual.dtype == _LP_TORCH
     assert fn.dtype == torch.float32
     assert hc_scale.dtype == torch.float32
     assert hc_base.dtype == torch.float32
@@ -83,7 +92,7 @@ def mhc_pre_torch(
 
     layer_input = torch.sum(
         pre_mix.unsqueeze(-1) * residual_flat.to(torch.float32), dim=1
-    ).to(torch.bfloat16)
+    ).to(_LP_TORCH)
     return (
         post_mix.view(*outer_shape, hc_mult, 1),
         comb_mix.view(*outer_shape, hc_mult, hc_mult),

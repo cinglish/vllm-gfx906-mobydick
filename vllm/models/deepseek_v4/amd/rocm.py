@@ -7,6 +7,14 @@ from typing import cast
 import torch
 
 from vllm.forward_context import get_forward_context
+from vllm.platforms import current_platform
+
+# gfx906 (MI50/MI60) has no native bf16 support; use fp16 instead.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx906
+    _LP_TORCH = torch.float16 if on_gfx906() else torch.bfloat16
+else:
+    _LP_TORCH = torch.bfloat16
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
@@ -629,7 +637,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             M = N + self.window_size + self.max_num_batched_tokens
             current_workspace_manager().get_simultaneous(
-                ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+                ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), _LP_TORCH),
             )
             output.zero_()
             return
@@ -786,7 +794,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         workspace_manager = current_workspace_manager()
         kv = workspace_manager.get_simultaneous(
-            ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+            ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), _LP_TORCH),
         )[0]
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * self.PREFILL_CHUNK_SIZE

@@ -26,6 +26,13 @@ else:
 
 ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
 
+# gfx906 (MI50/MI60) has no native bf16 support; use fp16 instead.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx906
+    _LP_TILELANG = T.float16 if on_gfx906() else T.bfloat16
+else:
+    _LP_TILELANG = T.bfloat16
+
 
 @cache
 def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
@@ -79,11 +86,11 @@ def mhc_pre_big_fuse_tilelang(
     gemm_out_sqrsum: T.Tensor[[n_splits, num_tokens], T.float32]  # type: ignore[no-redef, valid-type]
     hc_scale: T.Tensor[[3], T.float32]  # type: ignore[no-redef, valid-type]
     hc_base: T.Tensor[[hc_mult3], T.float32]  # type: ignore[no-redef, valid-type]
-    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], _LP_TILELANG]  # type: ignore[no-redef, valid-type]
     # outputs
     post_mix: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
     comb_mix: T.Tensor[[num_tokens, hc_mult * hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
-    layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+    layer_input: T.Tensor[[num_tokens, hidden_size], _LP_TILELANG]  # type: ignore[no-redef, valid-type]
 
     with T.Kernel(num_tokens, threads=96) as i:
         if ENABLE_PDL:
@@ -225,11 +232,11 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     gemm_out_sqrsum: T.Tensor[[n_splits, num_tokens], T.float32]  # type: ignore[no-redef, valid-type]
     hc_scale: T.Tensor[[3], T.float32]  # type: ignore[no-redef, valid-type]
     hc_base: T.Tensor[[hc_mult3], T.float32]  # type: ignore[no-redef, valid-type]
-    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], _LP_TILELANG]  # type: ignore[no-redef, valid-type]
     post_mix: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
     comb_mix: T.Tensor[[num_tokens, hc_mult * hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
-    layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
-    norm_weight: T.Tensor[[hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+    layer_input: T.Tensor[[num_tokens, hidden_size], _LP_TILELANG]  # type: ignore[no-redef, valid-type]
+    norm_weight: T.Tensor[[hidden_size], _LP_TILELANG]  # type: ignore[no-redef, valid-type]
 
     with T.Kernel(num_tokens, threads=96) as i:
         rms = T.alloc_fragment(1, T.float32)
@@ -305,12 +312,12 @@ def mhc_pre_big_fuse_with_norm_tilelang(
             # Pass 1: stash unnormalized weighted-sum output in shared memory
             # as bf16 (matches the rounding that RMSNorm would see) while
             # accumulating the per-position squared sum.
-            output_shared = T.alloc_shared(hidden_size, T.bfloat16)
+            output_shared = T.alloc_shared(hidden_size, _LP_TILELANG)
             sumsq_per_pos = T.alloc_fragment(hidden_block, T.float32)
             T.clear(sumsq_per_pos)
 
             for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
-                xs = T.alloc_shared((hc_mult, hidden_block), T.bfloat16)
+                xs = T.alloc_shared((hc_mult, hidden_block), _LP_TILELANG)
                 xl = T.alloc_fragment((hc_mult, hidden_block), T.float32)
                 T.copy(residual[i, 0, i0_h * hidden_block], xs)
                 T.copy(xs, xl)
@@ -325,7 +332,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
 
                 for i1_h in T.Parallel(hidden_block):
                     sumsq_per_pos[i1_h] += ol[i1_h] * ol[i1_h]
-                    output_shared[i0_h * hidden_block + i1_h] = T.bfloat16(ol[i1_h])
+                    output_shared[i0_h * hidden_block + i1_h] = _LP_TILELANG(ol[i1_h])
 
             sumsq = T.alloc_fragment(1, T.float32)
             T.reduce_sum(sumsq_per_pos, sumsq, dim=0)
@@ -334,7 +341,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
 
             # Pass 2: scale by rsqrt * norm_weight and write the result to HBM.
             for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
-                w_shared = T.alloc_shared(hidden_block, T.bfloat16)
+                w_shared = T.alloc_shared(hidden_block, _LP_TILELANG)
                 w_local = T.alloc_fragment(hidden_block, T.float32)
                 T.copy(norm_weight[i0_h * hidden_block], w_shared)
                 T.copy(w_shared, w_local)
@@ -382,13 +389,13 @@ def mhc_fused_tilelang(
     n_tiles = n_out // tile_n
 
     comb_mix: T.Tensor((m, hc, hc), T.float32)  # type: ignore[no-redef, valid-type]
-    residual_in: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    residual_in: T.Tensor((m, hc, h), _LP_TILELANG)  # type: ignore[no-redef, valid-type]
     post_mix: T.Tensor((m, hc), T.float32)  # type: ignore[no-redef, valid-type]
-    x_in: T.Tensor((m, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    x_in: T.Tensor((m, h), _LP_TILELANG)  # type: ignore[no-redef, valid-type]
     weight_t: T.Tensor((n_out, hc, h), T.float32)  # type: ignore[no-redef, valid-type]
     yp_out: T.Tensor((split_k, m, n_out), T.float32)  # type: ignore[no-redef, valid-type]
     rp_out: T.Tensor((split_k, m), T.float32)  # type: ignore[no-redef, valid-type]
-    residual_out: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    residual_out: T.Tensor((m, hc, h), _LP_TILELANG)  # type: ignore[no-redef, valid-type]
 
     h_iters = h_per_split // n_thr
     num_warps = n_thr // 32
@@ -496,13 +503,13 @@ def mhc_post_tilelang(
 
     h_blk = math.gcd(hidden, h_blk)
     a: T.Tensor((n, hc, hc), T.float32)  # type: ignore[no-redef, valid-type]
-    b: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    b: T.Tensor((n, hc, h), _LP_TILELANG)  # type: ignore[no-redef, valid-type]
     c: T.Tensor((n, hc), T.float32)  # type: ignore[no-redef, valid-type]
-    d: T.Tensor((n, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    x: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    d: T.Tensor((n, h), _LP_TILELANG)  # type: ignore[no-redef, valid-type]
+    x: T.Tensor((n, hc, h), _LP_TILELANG)  # type: ignore[no-redef, valid-type]
     with T.Kernel(n, threads=n_thr) as i_n:
-        b_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
-        d_shared = T.alloc_shared(h_blk, T.bfloat16)
+        b_shared = T.alloc_shared((hc, h_blk), _LP_TILELANG)
+        d_shared = T.alloc_shared(h_blk, _LP_TILELANG)
 
         x_local = T.alloc_fragment((hc, h_blk), T.float32)
         b_local = T.alloc_fragment((hc, h_blk), T.float32)
@@ -552,7 +559,7 @@ def hc_prenorm_gemm_tilelang(
     k_iters = k_per_split // n_thr
     n_tiles = T.ceildiv(n_out, tile_n)
 
-    x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    x: T.Tensor((num_tokens, hc_hidden_size), _LP_TILELANG)  # type: ignore[no-redef, valid-type]
     fn: T.Tensor((n_out, hc_hidden_size), T.float32)  # type: ignore[no-redef, valid-type]
     out: T.Tensor((n_splits, num_tokens, n_out), T.float32)  # type: ignore[no-redef, valid-type]
     sqrsum: T.Tensor((n_splits, num_tokens), T.float32)  # type: ignore[no-redef, valid-type]
@@ -638,7 +645,7 @@ def hc_prenorm_gemm_block_m_tilelang(
     n_tiles = T.ceildiv(n_out, tile_n)
     m_tiles = T.ceildiv(num_tokens, block_m)
 
-    x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    x: T.Tensor((num_tokens, hc_hidden_size), _LP_TILELANG)  # type: ignore[no-redef, valid-type]
     fn: T.Tensor((n_out, hc_hidden_size), T.float32)  # type: ignore[no-redef, valid-type]
     out: T.Tensor((1, num_tokens, n_out), T.float32)  # type: ignore[no-redef, valid-type]
     sqrsum: T.Tensor((1, num_tokens), T.float32)  # type: ignore[no-redef, valid-type]
@@ -741,11 +748,11 @@ def hc_head_fuse_tilelang(
     h_block = math.gcd(h_blk, hidden_size)
     n_h = hidden_size // h_block
 
-    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
+    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], _LP_TILELANG]  # type: ignore[no-redef,valid-type]
     fn: T.Tensor[[hc_mult, hc_dim], T.float32]  # type: ignore[no-redef,valid-type]
     hc_scale: T.Tensor[[1], T.float32]  # type: ignore[no-redef,valid-type]
     hc_base: T.Tensor[[hc_mult], T.float32]  # type: ignore[no-redef,valid-type]
-    out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
+    out: T.Tensor[[num_tokens, hidden_size], _LP_TILELANG]  # type: ignore[no-redef,valid-type]
 
     with T.Kernel(num_tokens, threads=n_thr) as i:
         if ENABLE_PDL:
@@ -793,7 +800,7 @@ def hc_head_fuse_tilelang(
         # Pass 2 – apply_mix: pipelined weighted sum over residual channels
         # ------------------------------------------------------------------
         for i0_h in T.Pipelined(n_h, num_stages=2):
-            xs = T.alloc_shared((hc_mult, h_block), T.bfloat16)
+            xs = T.alloc_shared((hc_mult, h_block), _LP_TILELANG)
             xl = T.alloc_fragment((hc_mult, h_block), T.float32)
             T.copy(residual[i, 0, i0_h * h_block], xs, disable_tma=True)
             T.copy(xs, xl)

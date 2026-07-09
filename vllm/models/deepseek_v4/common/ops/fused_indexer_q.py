@@ -3,8 +3,16 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
+
+# gfx906 (MI50/MI60) has no native bf16 support; use fp16 instead.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx906
+    _LP_TL = tl.float16 if on_gfx906() else _LP_TL
+else:
+    _LP_TL = _LP_TL
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
@@ -120,8 +128,8 @@ def _fused_indexer_q_rope_quant_kernel(
 
     # Match reference numerics: fp32 → bf16 → fp32 before the ue8m0 absmax.
     # Same pattern as the K-side compressor kernel (fused_compress_quant_cache.py).
-    r_even = r_even.to(tl.bfloat16).to(tl.float32)
-    r_odd = r_odd.to(tl.bfloat16).to(tl.float32)
+    r_even = r_even.to(_LP_TL).to(tl.float32)
+    r_odd = r_odd.to(_LP_TL).to(tl.float32)
 
     amax = tl.maximum(tl.max(tl.abs(r_even)), tl.max(tl.abs(r_odd)))
     if INDEX_Q_NOPE_DIM > 0:
@@ -256,8 +264,8 @@ def _fused_indexer_q_rope_mxfp4_kernel(
         r_even = x_even * cos_b - x_odd * sin_b
         r_odd = x_odd * cos_b + x_even * sin_b
         # bf16 roundtrip for parity with the FP8 kernel / reference numerics.
-        r_even = r_even.to(tl.bfloat16).to(tl.float32)
-        r_odd = r_odd.to(tl.bfloat16).to(tl.float32)
+        r_even = r_even.to(_LP_TL).to(tl.float32)
+        r_odd = r_odd.to(_LP_TL).to(tl.float32)
         packed, ue8m0 = _quantize_mxfp4_pair(r_even, r_odd)
         rope_byte_off = (INDEX_Q_NOPE_DIM + b * MXFP4_BLOCK) // 2
         tl.store(out_base + rope_byte_off + half_off, packed)

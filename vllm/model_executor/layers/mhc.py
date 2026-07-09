@@ -6,7 +6,15 @@ import torch
 # import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm.model_executor.custom_op import CustomOp
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
+
+# gfx906 (MI50/MI60) has no native bf16 support; use fp16 instead.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx906
+    _LP_TORCH = torch.float16 if on_gfx906() else torch.bfloat16
+else:
+    _LP_TORCH = torch.bfloat16
 
 HAS_TILELANG = has_tilelang()
 
@@ -324,7 +332,7 @@ class HCHeadOp(CustomOp):
             out = torch.empty(
                 num_tokens,
                 hidden_size,
-                dtype=torch.bfloat16,
+                dtype=_LP_TORCH,
                 device=hidden_states.device,
             )
             torch.ops.vllm.hc_head_triton(
@@ -359,7 +367,7 @@ class HCHeadOp(CustomOp):
         num_tokens = hs_flat.shape[0]
 
         out = torch.empty(
-            num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
+            num_tokens, hidden_size, dtype=_LP_TORCH, device=hidden_states.device
         )
         torch.ops.vllm.hc_head_triton(
             hs_flat,

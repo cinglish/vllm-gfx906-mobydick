@@ -23,9 +23,17 @@ from typing import Any
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .fused_indexer_q import _fp32x2_to_fp4x2
+
+# gfx906 (MI50/MI60) has no native bf16 support; use fp16 instead.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx906
+    _LP_TL = tl.float16 if on_gfx906() else _LP_TL
+else:
+    _LP_TL = _LP_TL
 
 
 def compress_norm_rope_store_triton(
@@ -239,7 +247,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     N_NOPE_BLOCKS: tl.constexpr = NOPE_HEAD_DIM // QUANT_BLOCK  # 7
     INV_FP8_MAX: tl.constexpr = 1.0 / FP8_MAX
 
-    quant_input = normed.to(tl.bfloat16).to(tl.float32)
+    quant_input = normed.to(_LP_TL).to(tl.float32)
     quant_2d = tl.reshape(quant_input, (N_QUANT_BLOCKS, QUANT_BLOCK))
     abs_2d = tl.abs(quant_2d)
     block_absmax = tl.max(abs_2d, axis=1)  # [N_QUANT_BLOCKS] fp32
@@ -290,10 +298,10 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     result = tl.interleave(new_even, new_odd)  # [TRITON_BLOCK_SIZE] fp32
 
     # Store rotated rope portion as bf16 into the cache's bf16 area.
-    bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
+    bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(_LP_TL))
     rope_local = block - NOPE_HEAD_DIM
     is_rope = (block >= NOPE_HEAD_DIM) & mask
-    tl.store(bf16_ptr + rope_local, result.to(tl.bfloat16), mask=is_rope)
+    tl.store(bf16_ptr + rope_local, result.to(_LP_TL), mask=is_rope)
 
 
 # =============================================================================
@@ -454,7 +462,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     )
     INV_FP8_MAX: tl.constexpr = 1.0 / FP8_MAX
 
-    result_bf16 = result.to(tl.bfloat16).to(tl.float32)
+    result_bf16 = result.to(_LP_TL).to(tl.float32)
     absmax = tl.max(tl.abs(result_bf16), axis=0)  # scalar
     absmax = tl.maximum(absmax, 1e-4)
     raw_scale = absmax * INV_FP8_MAX
@@ -628,8 +636,8 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     new_odd = odd * cos_v + even * sin_v
 
     # bf16 roundtrip for parity with reference / Q-side kernel numerics.
-    new_even = new_even.to(tl.bfloat16).to(tl.float32)
-    new_odd = new_odd.to(tl.bfloat16).to(tl.float32)
+    new_even = new_even.to(_LP_TL).to(tl.float32)
+    new_odd = new_odd.to(_LP_TL).to(tl.float32)
 
     # ── MXFP4 quant: tile even/odd halves into (N_BLOCKS, HALF_BLOCK) ──
     # Each MXFP4 block of QUANT_BLOCK elements = HALF_BLOCK consecutive pairs,

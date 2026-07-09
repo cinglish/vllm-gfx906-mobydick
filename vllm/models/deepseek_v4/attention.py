@@ -91,8 +91,14 @@ def _resolve_dsv4_kv_cache_dtype(
     # Plain bf16 / per-tensor fp8 KV row (FlashInfer).
     if kv_cache_dtype.startswith("fp8"):
         return kv_cache_dtype, torch.float8_e4m3fn
-    # auto / bfloat16 -> plain bf16 KV row.
-    return kv_cache_dtype, torch.bfloat16
+    # auto / bfloat16 -> plain low-precision KV row.
+    from vllm.platforms import current_platform
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx906
+        lp_dtype = torch.float16 if on_gfx906() else torch.bfloat16
+    else:
+        lp_dtype = torch.bfloat16
+    return kv_cache_dtype, lp_dtype
 
 
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):

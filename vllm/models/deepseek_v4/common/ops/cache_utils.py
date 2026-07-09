@@ -16,8 +16,18 @@ preparation.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
+
+# gfx906 (MI50/MI60) has no native bf16 support; use fp16 instead.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx906
+    _LP_TL = tl.float16 if on_gfx906() else _LP_TL
+    _LP_TORCH = torch.float16 if on_gfx906() else _LP_TORCH
+else:
+    _LP_TL = _LP_TL
+    _LP_TORCH = _LP_TORCH
 
 
 @triton.jit
@@ -132,7 +142,7 @@ def quantize_and_insert_k_kernel(
     bf16_input_offset = fp8_dim
 
     # Process bf16 in chunks of 16
-    bf16_out_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+    bf16_out_ptr = token_bf16_ptr.to(tl.pointer_type(_LP_TL))
     for i in tl.static_range(bf16_dim // 16):
         chunk_offsets = i * 16 + tl.arange(0, 16)
         bf16_vals = tl.load(input_row_ptr + bf16_input_offset + chunk_offsets)
@@ -159,7 +169,7 @@ def quantize_and_insert_k_cache(
     assert k.dim() == 2 and k.shape[1] == 512, (
         f"K must be [num_tokens, 512], got {k.shape}"
     )
-    assert k.dtype == torch.bfloat16, f"K must be bf16, got {k.dtype}"
+    assert k.dtype == _LP_TORCH, f"K must be bf16, got {k.dtype}"
     assert is_ue8m0, "Only support ue8m0 quantization."
 
     # NOTE: When using DP, slot_mapping.shape[0] can be less than k.shape[0] due to
@@ -289,13 +299,13 @@ def _dequantize_and_gather_k_kernel(
                 x_dequant = x_float * scale
 
                 # Store as bf16
-                tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
+                tl.store(output_row_ptr + offsets, x_dequant.to(_LP_TL), mask=mask)
 
         # ========== Copy BF16 portion directly ==========
         bf16_output_offset = fp8_dim  # After 448 elements in output
 
         # Read bf16 from cache
-        bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+        bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(_LP_TL))
 
         # Process in chunks of 16
         for j in tl.static_range(bf16_dim // 16):

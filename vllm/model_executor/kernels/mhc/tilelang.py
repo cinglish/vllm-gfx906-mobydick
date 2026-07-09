@@ -2,7 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+# gfx906 (MI50/MI60) has no native bf16 support; use fp16 instead.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx906
+    _LP_TORCH = torch.float16 if on_gfx906() else torch.bfloat16
+else:
+    _LP_TORCH = torch.bfloat16
 
 
 def _torch_hc_prenorm_gemm(
@@ -105,7 +113,7 @@ def mhc_pre_tilelang(
     Forward pass for mHC pre block.
 
     Args:
-        residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
+        residual: shape (..., hc_mult, hidden_size), dtype _LP_TORCH
         fn: shape (hc_mult3, hc_mult * hidden_size), dtype torch.float32
         hc_scale: shape (3,), dtype torch.float32
         hc_base: shape (hc_mult3,), dtype torch.float32
@@ -116,7 +124,7 @@ def mhc_pre_tilelang(
         sinkhorn_repeat: number of sinkhorn iterations
         n_splits: split-k factor;
         norm_weight: optional RMSNorm weight, shape (hidden_size,), dtype
-            torch.bfloat16. When provided, RMSNorm is fused into the
+            _LP_TORCH. When provided, RMSNorm is fused into the
             layer_input write path of the big_fuse kernel.
         norm_eps: epsilon for the fused RMSNorm; only consulted when
             norm_weight is given.
@@ -124,7 +132,7 @@ def mhc_pre_tilelang(
     Returns:
         post_mix: shape (..., hc_mult), dtype torch.float32
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
-        layer_input: shape (..., hidden_size), dtype torch.bfloat16
+        layer_input: shape (..., hidden_size), dtype _LP_TORCH
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
@@ -134,7 +142,7 @@ def mhc_pre_tilelang(
     from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
     from vllm.utils.math_utils import cdiv
 
-    assert residual.dtype == torch.bfloat16
+    assert residual.dtype == _LP_TORCH
     assert fn.dtype == torch.float32
     assert hc_scale.dtype == torch.float32
     assert hc_base.dtype == torch.float32
@@ -152,8 +160,8 @@ def mhc_pre_tilelang(
 
     if norm_weight is not None:
         assert norm_weight.shape == (hidden_size,)
-        if norm_weight.dtype != torch.bfloat16:
-            norm_weight = norm_weight.to(torch.bfloat16)
+        if norm_weight.dtype != _LP_TORCH:
+            norm_weight = norm_weight.to(_LP_TORCH)
         if not norm_weight.is_contiguous():
             norm_weight = norm_weight.contiguous()
 
@@ -180,7 +188,7 @@ def mhc_pre_tilelang(
         num_tokens, hc_mult2, dtype=torch.float32, device=residual.device
     )
     layer_input = torch.empty(
-        num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
+        num_tokens, hidden_size, dtype=_LP_TORCH, device=residual.device
     )
 
     gemm_out_mul = torch.empty(
@@ -293,7 +301,7 @@ def _mhc_pre_tilelang_fake(
     layer_input = torch.empty(
         *outer_shape,
         hidden_size,
-        dtype=torch.bfloat16,
+        dtype=_LP_TORCH,
         device=residual.device,
     )
 
@@ -364,8 +372,8 @@ def mhc_fused_post_pre_tilelang(
     )
     from vllm.utils.math_utils import cdiv
 
-    assert residual.dtype == torch.bfloat16
-    assert x.dtype == torch.bfloat16
+    assert residual.dtype == _LP_TORCH
+    assert x.dtype == _LP_TORCH
     assert post_layer_mix.dtype == torch.float32
     assert comb_res_mix.dtype == torch.float32
     assert fn.dtype == torch.float32
@@ -391,8 +399,8 @@ def mhc_fused_post_pre_tilelang(
 
     if norm_weight is not None:
         assert norm_weight.shape == (hidden_size,)
-        if norm_weight.dtype != torch.bfloat16:
-            norm_weight = norm_weight.to(torch.bfloat16)
+        if norm_weight.dtype != _LP_TORCH:
+            norm_weight = norm_weight.to(_LP_TORCH)
         if not norm_weight.is_contiguous():
             norm_weight = norm_weight.contiguous()
 
@@ -453,7 +461,7 @@ def mhc_fused_post_pre_tilelang(
     layer_input_cur = torch.empty(
         num_tokens,
         hidden_size,
-        dtype=torch.bfloat16,
+        dtype=_LP_TORCH,
         device=residual.device,
     )
 
@@ -594,7 +602,7 @@ def _mhc_fused_post_pre_tilelang_fake(
     layer_input_cur = torch.empty(
         *outer_shape,
         hidden_size,
-        dtype=torch.bfloat16,
+        dtype=_LP_TORCH,
         device=residual.device,
     )
 
@@ -621,7 +629,7 @@ def hc_head_fused_kernel_tilelang(
     """Apply the fused hc_head kernel and return the (T, H) bf16 result."""
     num_tokens, hc_mult, hidden_size = hs_flat.shape
     out = torch.empty(
-        num_tokens, hidden_size, dtype=torch.bfloat16, device=hs_flat.device
+        num_tokens, hidden_size, dtype=_LP_TORCH, device=hs_flat.device
     )
     if num_tokens == 0:
         return out
@@ -651,7 +659,7 @@ def _hc_head_fused_kernel_tilelang_fake(
 ) -> torch.Tensor:
     num_tokens, _, hidden_size = hs_flat.shape
     return torch.empty(
-        num_tokens, hidden_size, dtype=torch.bfloat16, device=hs_flat.device
+        num_tokens, hidden_size, dtype=_LP_TORCH, device=hs_flat.device
     )
 
 
