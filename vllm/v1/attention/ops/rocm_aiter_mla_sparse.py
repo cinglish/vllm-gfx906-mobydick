@@ -635,10 +635,13 @@ def fp8_paged_mqa_logits_torch(
 @functools.lru_cache
 def paged_mqa_logits_module():
     paged_mqa_logits_module_path = None
-    if find_spec("aiter.ops.triton.pa_mqa_logits") is not None:
-        paged_mqa_logits_module_path = "aiter.ops.triton.pa_mqa_logits"
-    elif find_spec("aiter.ops.triton.attention.pa_mqa_logits") is not None:
-        paged_mqa_logits_module_path = "aiter.ops.triton.attention.pa_mqa_logits"
+    try:
+        if find_spec("aiter.ops.triton.pa_mqa_logits") is not None:
+            paged_mqa_logits_module_path = "aiter.ops.triton.pa_mqa_logits"
+        elif find_spec("aiter.ops.triton.attention.pa_mqa_logits") is not None:
+            paged_mqa_logits_module_path = "aiter.ops.triton.attention.pa_mqa_logits"
+    except ModuleNotFoundError:
+        pass
 
     if paged_mqa_logits_module_path is not None:
         try:
@@ -1181,10 +1184,13 @@ def fp8_mqa_logits_torch(
 @functools.lru_cache
 def mqa_logits_module():
     mqa_logits_module_path = None
-    if find_spec("aiter.ops.triton.fp8_mqa_logits") is not None:
-        mqa_logits_module_path = "aiter.ops.triton.fp8_mqa_logits"
-    elif find_spec("aiter.ops.triton.attention.fp8_mqa_logits") is not None:
-        mqa_logits_module_path = "aiter.ops.triton.attention.fp8_mqa_logits"
+    try:
+        if find_spec("aiter.ops.triton.fp8_mqa_logits") is not None:
+            mqa_logits_module_path = "aiter.ops.triton.fp8_mqa_logits"
+        elif find_spec("aiter.ops.triton.attention.fp8_mqa_logits") is not None:
+            mqa_logits_module_path = "aiter.ops.triton.attention.fp8_mqa_logits"
+    except ModuleNotFoundError:
+        pass
 
     if mqa_logits_module_path is not None:
         try:
