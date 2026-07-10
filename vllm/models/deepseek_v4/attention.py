@@ -56,9 +56,17 @@ from vllm.v1.attention.backends.mla.indexer import (
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
+
+
+def _is_gfx906() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx906
+        return on_gfx906()
+    return False
 
 
 def _resolve_dsv4_kv_cache_dtype(
@@ -117,7 +125,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # KV-cache per-token block format (both layouts are paged). True (default)
     # = FlashMLA / ROCm fp8_ds_mla (UE8M0 block-scaled fp8 packed as uint8);
     # False = FlashInfer plain bf16 / per-tensor fp8 KV row.
-    use_flashmla_fp8_layout: ClassVar[bool] = True
+    # NOTE(gfx906): gfx906 has no fp8 support; disable the fp8_ds_mla layout
+    # so the cache uses plain fp16 KV rows instead.
+    use_flashmla_fp8_layout: ClassVar[bool] = not (
+        current_platform.is_rocm() and _is_gfx906()
+    )
     # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
