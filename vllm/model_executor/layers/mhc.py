@@ -459,6 +459,13 @@ class MHCFusedPostPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not HAS_TILELANG:
+            return self.forward_native(
+                x, residual, post_layer_mix, comb_res_mix, fn, hc_scale,
+                hc_base, rms_eps, hc_pre_eps, hc_sinkhorn_eps,
+                hc_post_mult_value, sinkhorn_repeat, n_splits, tile_n,
+                norm_weight, norm_eps,
+            )
         return torch.ops.vllm.mhc_fused_post_pre_tilelang(
             x,
             residual,
