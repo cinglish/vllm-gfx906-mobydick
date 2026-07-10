@@ -582,18 +582,41 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         block_size = swa_metadata.block_size
         swa_kv_cache_3d = swa_kv_cache.view(-1, block_size, self.head_dim)
         if cache_dtype in (torch.bfloat16, torch.float16):
-            # NOTE(gfx906): The C++ kernel name says "bf16" but it dispatches on
-            # the actual tensor dtype internally. fp16 tensors are handled correctly.
-            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
-                q,
-                kv,
-                swa_kv_cache_3d,
-                swa_metadata.slot_mapping,
-                positions,
-                cos_sin_cache,
-                self.eps,
-                block_size,
-            )
+            # NOTE(gfx906): The fused C++ kernel is not compiled for gfx906.
+            # Decompose into: Q RMSNorm + RoPE, KV RoPE + cache insert.
+            # Q: per-head RMSNorm (no weight) + RoPE
+            num_tokens, head_dim = q.shape[0], q.shape[-1]
+            q_nope_dim = head_dim - self.rotary_emb.rotary_dim
+            q_2d = q.view(num_tokens, -1, head_dim)
+            # RMSNorm per head (no weight)
+            q_float = q_2d.float()
+            variance = q_float.pow(2).mean(dim=-1, keepdim=True)
+            q_normed = (q_float * torch.rsqrt(variance + self.eps)).to(q.dtype)
+            # Apply RoPE to Q
+            cos_sin = cos_sin_cache[positions]  # [num_tokens, rotary_dim]
+            rotary_dim = self.rotary_emb.rotary_dim
+            cos = cos_sin[:, :rotary_dim // 2].unsqueeze(1)
+            sin = cos_sin[:, rotary_dim // 2:].unsqueeze(1)
+            q_rope_part = q_normed[..., q_nope_dim:]
+            q_rope_even = q_rope_part[..., 0::2]
+            q_rope_odd = q_rope_part[..., 1::2]
+            q_normed[..., q_nope_dim + 0::2] = q_rope_even * cos - q_rope_odd * sin
+            q_normed[..., q_nope_dim + 1::2] = q_rope_even * sin + q_rope_odd * cos
+            q = q_normed.view_as(q)
+            # KV: Apply RoPE to rope portion and insert into cache
+            kv_nope_dim = kv.shape[-1] - rotary_dim
+            kv_rope_part = kv[..., kv_nope_dim:].clone()
+            kv_rope_even = kv_rope_part[..., 0::2]
+            kv_rope_odd = kv_rope_part[..., 1::2]
+            cos_kv = cos_sin[:, :rotary_dim // 2].unsqueeze(1)
+            sin_kv = cos_sin[:, rotary_dim // 2:].unsqueeze(1)
+            kv[..., kv_nope_dim + 0::2] = kv_rope_even * cos_kv - kv_rope_odd * sin_kv
+            kv[..., kv_nope_dim + 1::2] = kv_rope_even * sin_kv + kv_rope_odd * cos_kv
+            # Insert into SWA cache
+            slot_mapping = swa_metadata.slot_mapping
+            block_indices = slot_mapping // block_size
+            block_offsets = slot_mapping % block_size
+            swa_kv_cache_3d[block_indices, block_offsets] = kv.squeeze(1).to(cache_dtype)
             return q
 
         # per-tensor fp8 (torch.float8_e4m3fn)
