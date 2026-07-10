@@ -498,20 +498,23 @@ def fp16_paged_mqa_logits_torch(
     batch_size, next_n, heads, dim = q.size()
     num_block, block_size, _, dim = kv_cache.size()
     logits = torch.full([batch_size * next_n, max_model_len], float('-inf'), device=q.device, dtype=torch.float32)
+    is_context_lens_2d = context_lens.ndim == 2
     context_lens = context_lens.tolist()
-    
-    is_context_lens_2d = False # assumed to never be 2d
    
     for i in range(batch_size):
         context_len = context_lens[i]
-        q_offsets = torch.full((next_n, ), context_len, device='cuda', dtype=torch.int32) if is_context_lens_2d \
-                    else torch.arange(context_len - next_n, context_len, device='cuda')
-        
+        if is_context_lens_2d:
+            q_offsets = torch.tensor(context_len, device='cuda', dtype=torch.int32)
+            context_len_scalar = max(context_len)
+        else:
+            q_offsets = torch.arange(context_len - next_n, context_len, device='cuda')
+            context_len_scalar = context_len
+
         weight_slice = (
             weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
         )
-        
-        num_blocks = (context_len + block_size - 1) // block_size
+
+        num_blocks = (context_len_scalar + block_size - 1) // block_size
         block_idxs = block_tables[i][:num_blocks]
         kv_slice = kv_cache[block_idxs]                 # [num_blocks, block_size, kv_heads, dim]
         kx = kv_slice.permute(2, 3, 0, 1).reshape(kv_slice.size(2), dim, -1)    # [kv_heads, dim, total_tokens]
@@ -520,7 +523,7 @@ def fp16_paged_mqa_logits_torch(
 
         total_len = num_blocks * block_size
         k_offsets = torch.arange(0, total_len, device=q.device)
-        mask = (k_offsets[None, :] < context_len) & (k_offsets[None, :] <= q_offsets[:, None])
+        mask = (k_offsets[None, :] < context_len_scalar) & (k_offsets[None, :] <= q_offsets[:, None])
         s = torch.where(mask[None, :, :], s, float('-inf'))     # mask shape: [1, next_n, total_tokens]
         s = torch.relu(s) * weight_slice[..., None]             # weight_slice: [heads, next_n] -> [heads, next_n, 1]
         s = s.sum(dim=0)                                        # [next_n, total_tokens]
