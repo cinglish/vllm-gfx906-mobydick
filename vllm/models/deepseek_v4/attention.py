@@ -608,8 +608,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             kv_rope_part = kv[..., kv_nope_dim:].clone()
             kv_rope_even = kv_rope_part[..., 0::2]
             kv_rope_odd = kv_rope_part[..., 1::2]
-            cos_kv = cos_sin[:, :rotary_dim // 2].unsqueeze(1)
-            sin_kv = cos_sin[:, rotary_dim // 2:].unsqueeze(1)
+            # Reshape cos/sin to broadcast with kv shape [tokens, kv_heads, dim]
+            cos_kv = cos_sin[:, :rotary_dim // 2]
+            sin_kv = cos_sin[:, rotary_dim // 2:]
+            while cos_kv.ndim < kv_rope_even.ndim:
+                cos_kv = cos_kv.unsqueeze(1)
+                sin_kv = sin_kv.unsqueeze(1)
             kv[..., kv_nope_dim + 0::2] = kv_rope_even * cos_kv - kv_rope_odd * sin_kv
             kv[..., kv_nope_dim + 1::2] = kv_rope_even * sin_kv + kv_rope_odd * cos_kv
             # Insert into SWA cache
