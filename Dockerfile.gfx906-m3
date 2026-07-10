@@ -34,6 +34,8 @@ COPY vllm/models/deepseek_v4/common/ops/fused_qk_rmsnorm.py \
      /usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/common/ops/fused_qk_rmsnorm.py
 COPY vllm/v1/attention/ops/rocm_aiter_mla_sparse.py \
      /usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+COPY vllm/v1/attention/backends/mla/sparse_swa.py \
+     /usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/sparse_swa.py
 
 # Clear any baked-in Triton cache so patched kernels recompile
 RUN rm -rf /root/.triton/cache

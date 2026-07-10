@@ -76,7 +76,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         self.block_size = 64
         # uint8: legacy FlashMLA UE8M0 paged layout. bfloat16 / float8_e4m3fn:
         # FlashInfer contiguous full-cache layout.
-        assert self.dtype in (torch.uint8, torch.bfloat16, torch.float8_e4m3fn)
+        assert self.dtype in (torch.uint8, torch.bfloat16, torch.float16, torch.float8_e4m3fn)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # FlashMLA's UE8M0 paged layout needs 576B alignment; FlashInfer's
