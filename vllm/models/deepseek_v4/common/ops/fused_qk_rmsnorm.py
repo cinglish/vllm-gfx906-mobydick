@@ -54,6 +54,14 @@ def _fused_q_kv_rmsnorm_kernel(
     tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
 
 
+def _rmsnorm_torch(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """Pure torch RMSNorm fallback."""
+    x_float = x.float()
+    variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+    x_normed = x_float * torch.rsqrt(variance + eps)
+    return (x_normed * weight.float()).to(x.dtype)
+
+
 def fused_q_kv_rmsnorm(
     qr: torch.Tensor,
     kv: torch.Tensor,
@@ -77,6 +85,12 @@ def fused_q_kv_rmsnorm(
         return qr_out, kv_out
 
     block_size = triton.next_power_of_2(max(q_size, kv_size))
+
+    # gfx906: Triton PassManager fails with very large BLOCK_SIZE.
+    # Fall back to pure torch RMSNorm.
+    if block_size > 16384:
+        return _rmsnorm_torch(qr, q_weight, eps), _rmsnorm_torch(kv, kv_weight, eps)
+
     _fused_q_kv_rmsnorm_kernel[(num_tokens, 2)](
         qr,
         qr_out,
