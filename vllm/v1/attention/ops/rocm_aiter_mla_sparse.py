@@ -382,30 +382,17 @@ def _deepgemm_fp16_paged_mqa_logits_stage1(
             q7 = tl.load(q_base + (hg_start + 7) * stride_q_heads + d_offs)
 
             # Dot products: kv_tile[CHUNK_K, BLOCK_D] * q[BLOCK_D] ? [CHUNK_K]
-            s0 += tl.sum(
-                kv_tile * q0[None, :].to(kv_tile.dtype), axis=1
-            )
-            s1 += tl.sum(
-                kv_tile * q1[None, :].to(kv_tile.dtype), axis=1
-            )
-            s2 += tl.sum(
-                kv_tile * q2[None, :].to(kv_tile.dtype), axis=1
-            )
-            s3 += tl.sum(
-                kv_tile * q3[None, :].to(kv_tile.dtype), axis=1
-            )
-            s4 += tl.sum(
-                kv_tile * q4[None, :].to(kv_tile.dtype), axis=1
-            )
-            s5 += tl.sum(
-                kv_tile * q5[None, :].to(kv_tile.dtype), axis=1
-            )
-            s6 += tl.sum(
-                kv_tile * q6[None, :].to(kv_tile.dtype), axis=1
-            )
-            s7 += tl.sum(
-                kv_tile * q7[None, :].to(kv_tile.dtype), axis=1
-            )
+            # NOTE(gfx906): upcast kv_tile to q dtype instead of downcasting q
+            # to kv dtype — gfx906 cannot cast fp16 to fp8.
+            kv_f = kv_tile.to(q0.dtype)
+            s0 += tl.sum(kv_f * q0[None, :], axis=1)
+            s1 += tl.sum(kv_f * q1[None, :], axis=1)
+            s2 += tl.sum(kv_f * q2[None, :], axis=1)
+            s3 += tl.sum(kv_f * q3[None, :], axis=1)
+            s4 += tl.sum(kv_f * q4[None, :], axis=1)
+            s5 += tl.sum(kv_f * q5[None, :], axis=1)
+            s6 += tl.sum(kv_f * q6[None, :], axis=1)
+            s7 += tl.sum(kv_f * q7[None, :], axis=1)
 
         # ReLU + weight multiply + accumulate for all 8 heads
         w0 = tl.load(w_base + (hg_start + 0))
