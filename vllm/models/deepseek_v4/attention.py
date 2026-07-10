@@ -581,7 +581,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # quantizes the KV row.
         block_size = swa_metadata.block_size
         swa_kv_cache_3d = swa_kv_cache.view(-1, block_size, self.head_dim)
-        if cache_dtype == torch.bfloat16:
+        if cache_dtype in (torch.bfloat16, torch.float16):
+            # NOTE(gfx906): The C++ kernel name says "bf16" but it dispatches on
+            # the actual tensor dtype internally. fp16 tensors are handled correctly.
             torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
                 q,
                 kv,
