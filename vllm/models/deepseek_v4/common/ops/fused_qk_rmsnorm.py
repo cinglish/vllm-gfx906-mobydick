@@ -86,10 +86,13 @@ def fused_q_kv_rmsnorm(
 
     block_size = triton.next_power_of_2(max(q_size, kv_size))
 
-    # gfx906: Triton PassManager fails with very large BLOCK_SIZE.
+    # gfx906: Triton AMD CanonicalizePointers pass fails on this kernel.
     # Fall back to pure torch RMSNorm.
-    if block_size > 16384:
-        return _rmsnorm_torch(qr, q_weight, eps), _rmsnorm_torch(kv, kv_weight, eps)
+    from vllm.platforms import current_platform
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx906
+        if on_gfx906():
+            return _rmsnorm_torch(qr, q_weight, eps), _rmsnorm_torch(kv, kv_weight, eps)
 
     _fused_q_kv_rmsnorm_kernel[(num_tokens, 2)](
         qr,
