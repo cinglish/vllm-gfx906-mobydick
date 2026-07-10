@@ -13,6 +13,15 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+# gfx906 (MI50/MI60) has no native bf16 support; use fp16 instead.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx906
+    _LP_TL = tl.float16 if on_gfx906() else tl.bfloat16
+    _LP_TORCH = torch.float16 if on_gfx906() else torch.bfloat16
+else:
+    _LP_TL = tl.bfloat16
+    _LP_TORCH = torch.bfloat16
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
@@ -1150,8 +1159,8 @@ def fp8_mqa_logits_torch(
     """
     k_fp8, scale = kv
     seq_len_kv = k_fp8.shape[0]
-    k = k_fp8.to(torch.bfloat16)
-    q = q.to(torch.bfloat16)
+    k = k_fp8.to(_LP_TORCH)
+    q = q.to(_LP_TORCH)
     device = q.device
 
     mask_lo = (
@@ -1611,7 +1620,7 @@ def _inverse_rope_gptj_kernel(
     n = tl.arange(0, BLOCK_NOPE)
     nmask = n < NOPE
     vals = tl.load(o_ptr + in_base + n, mask=nmask)
-    tl.store(out_ptr + out_base + n, vals.to(tl.bfloat16), mask=nmask)
+    tl.store(out_ptr + out_base + n, vals.to(_LP_TL), mask=nmask)
 
     # RoPE lanes: out_even = a*cos + b*sin, out_odd = b*cos - a*sin
     # (a = even lane, b = odd lane; sin negated for the inverse rotation).
@@ -1624,8 +1633,8 @@ def _inverse_rope_gptj_kernel(
     sin = tl.load(cos_sin_ptr + pos * cs_stride + HALF + k, mask=kmask)
     out_even = a * cos + b * sin
     out_odd = b * cos - a * sin
-    tl.store(out_ptr + out_base + NOPE + 2 * k, out_even.to(tl.bfloat16), mask=kmask)
-    tl.store(out_ptr + out_base + NOPE + 2 * k + 1, out_odd.to(tl.bfloat16), mask=kmask)
+    tl.store(out_ptr + out_base + NOPE + 2 * k, out_even.to(_LP_TL), mask=kmask)
+    tl.store(out_ptr + out_base + NOPE + 2 * k + 1, out_odd.to(_LP_TL), mask=kmask)
 
 
 def _fused_inverse_rope_gptj(
@@ -1647,7 +1656,7 @@ def _fused_inverse_rope_gptj(
     )
     num_tokens, num_heads, head_dim = o.shape
     out = torch.empty(
-        (num_tokens, num_heads, head_dim), dtype=torch.bfloat16, device=o.device
+        (num_tokens, num_heads, head_dim), dtype=_LP_TORCH, device=o.device
     )
     if num_tokens == 0:
         return out
@@ -1697,10 +1706,10 @@ def _get_cached_wo_a_bf16(
             o_lora_rank,
             hidden_dim,
         )
-        cached = (wo_a_weight * wo_a_scale).to(torch.bfloat16)
+        cached = (wo_a_weight * wo_a_scale).to(_LP_TORCH)
     else:
         cached = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
-            torch.bfloat16
+            _LP_TORCH
         )
     wo_a._dsv4_wo_a_bf16 = cached
     return cached
@@ -2009,8 +2018,8 @@ def _sparse_attn_decode_ragged_kernel(
     main_end = tl.load(main_indptr_ptr + query_idx + 1)
     main_len = main_end - main_start
 
-    zero_nope = tl.zeros((BLOCK_K, NOPE_BLOCK), dtype=tl.bfloat16)
-    zero_rope = tl.zeros((BLOCK_K, ROPE_DIM), dtype=tl.bfloat16)
+    zero_nope = tl.zeros((BLOCK_K, NOPE_BLOCK), dtype=_LP_TL)
+    zero_rope = tl.zeros((BLOCK_K, ROPE_DIM), dtype=_LP_TL)
 
     for k_start in tl.range(0, main_len, BLOCK_K):
         k_pos = k_start + k_offsets
@@ -2040,11 +2049,11 @@ def _sparse_attn_decode_ragged_kernel(
             other=127,
         )
         scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
-        k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
+        k_nope = x_fp8.to(_LP_TL) * scales.to(_LP_TL)
         k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
         k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
 
-        rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
+        rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(_LP_TL))
         k_rope = tl.load(
             rope_ptr[:, None] + rope_offsets[None, :],
             mask=valid[:, None],
@@ -2108,11 +2117,11 @@ def _sparse_attn_decode_ragged_kernel(
                 other=127,
             )
             scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
-            k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
+            k_nope = x_fp8.to(_LP_TL) * scales.to(_LP_TL)
             k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
             k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
 
-            rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
+            rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(_LP_TL))
             k_rope = tl.load(
                 rope_ptr[:, None] + rope_offsets[None, :],
                 mask=valid[:, None],
@@ -2244,8 +2253,8 @@ def _sparse_attn_decode_partial_kernel(
     acc_rope = tl.zeros((BLOCK_H, ROPE_DIM), dtype=tl.float32)
     k_offsets = tl.arange(0, BLOCK_K)
 
-    zero_nope = tl.zeros((BLOCK_K, NOPE_BLOCK), dtype=tl.bfloat16)
-    zero_rope = tl.zeros((BLOCK_K, ROPE_DIM), dtype=tl.bfloat16)
+    zero_nope = tl.zeros((BLOCK_K, NOPE_BLOCK), dtype=_LP_TL)
+    zero_rope = tl.zeros((BLOCK_K, ROPE_DIM), dtype=_LP_TL)
 
     # Each split processes a contiguous slice of this query's main (SWA) and
     # extra (topk) segments. Slices are handled independently so a block never
@@ -2285,11 +2294,11 @@ def _sparse_attn_decode_partial_kernel(
             other=127,
         )
         scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
-        k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
+        k_nope = x_fp8.to(_LP_TL) * scales.to(_LP_TL)
         k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
         k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
 
-        rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
+        rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(_LP_TL))
         k_rope = tl.load(
             rope_ptr[:, None] + rope_offsets[None, :],
             mask=valid[:, None],
@@ -2356,11 +2365,11 @@ def _sparse_attn_decode_partial_kernel(
                 other=127,
             )
             scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
-            k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
+            k_nope = x_fp8.to(_LP_TL) * scales.to(_LP_TL)
             k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
             k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
 
-            rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
+            rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(_LP_TL))
             k_rope = tl.load(
                 rope_ptr[:, None] + rope_offsets[None, :],
                 mask=valid[:, None],
@@ -2558,7 +2567,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     block_h = 16
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
-    out = torch.empty_like(q, dtype=torch.bfloat16)
+    out = torch.empty_like(q, dtype=_LP_TORCH)
     _sparse_attn_prefill_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
         q,
         kv,
@@ -2784,7 +2793,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         extra_indptr = torch.zeros(num_queries + 1, device=q.device, dtype=torch.int32)
 
     block_h = 16
-    out = torch.empty_like(q, dtype=torch.bfloat16)
+    out = torch.empty_like(q, dtype=_LP_TORCH)
     heads_blocks = triton.cdiv(num_heads, block_h)
     nope_block = triton.next_power_of_2(nope_head_dim)
     comb_dim = nope_head_dim + rope_head_dim
